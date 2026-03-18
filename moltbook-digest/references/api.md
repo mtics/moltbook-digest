@@ -144,3 +144,28 @@ Example for a user asking about agent memory:
 - `agent memory failures and tradeoffs`
 
 This gives a better corpus than simply searching `memory`.
+
+## Analysis Execution Paths
+
+The current script supports two interpretation paths after collection:
+
+### 1. `--analysis-mode litellm`
+
+- Integrates `litellm.completion(...)`
+- Suitable when users provide their own LLM endpoint and credentials
+- Key args: `--litellm-model`, `--analysis-question`, `--analysis-context-char-limit`
+- Writes `analysis_report.md`
+
+### 2. `--analysis-mode agent`
+
+- Does not call an external LLM API
+- Prepares `analysis_input.md` plus `agent_handoff.md`
+- Suitable when users prefer their own agent runtime to do the reasoning pass
+
+### Practical guidance
+
+- If you need deterministic script-side interpretation, choose LiteLLM.
+- If you need higher flexibility or custom orchestration, choose agent mode.
+- If unsure, run with `--analysis-mode both` and compare outputs.
+- You can set `active_provider` in `config.yaml`; code-level defaults fill most provider details so config stays minimal.
+- `analysis.prompt_template` in `config.yaml` controls LiteLLM prompting and should explicitly require output in `{analysis_language}`.

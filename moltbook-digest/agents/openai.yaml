@@ -2,7 +2,7 @@ interface:
   display_name: "Moltbook Digest"
   short_description: "Research Moltbook threads and write deep reports"
   brand_color: "#E01B24"
-  default_prompt: "Use $moltbook-digest to research Moltbook discussions for a topic and produce a structured analytical report."
+  default_prompt: "Use $moltbook-digest to collect Moltbook evidence, then interpret it via LiteLLM or direct agent analysis into a structured report."
 
 policy:
   allow_implicit_invocation: true

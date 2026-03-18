@@ -75,6 +75,15 @@ The script writes:
 
 Use repeated `--query` flags when the user's wording is too narrow for reliable coverage.
 
+### 2.5 Choose an interpretation path
+
+After evidence collection, choose one of two analysis methods:
+
+1. LiteLLM path (standalone LLM endpoint)
+2. Agent path (your current agent reads and interprets the corpus)
+
+Both methods start from the same evidence pack.
+
 ### 3. Expand only the posts that matter
 
 Do not analyze every hit equally.
@@ -96,6 +105,82 @@ Your report should answer questions like:
 - What follow-up queries would improve confidence?
 
 Never imply exhaustive coverage unless you truly scanned the full relevant corpus.
+
+## Interpretation Modes
+
+### Mode A: LiteLLM (standalone LLM interface)
+
+Use this when the user wants script-level automatic interpretation.
+
+Install:
+
+```bash
+pip install litellm
+```
+
+Or install from the project file:
+
+```bash
+pip install -r requirements.txt
+```
+
+Provider config template:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Then fill real keys in `config.yaml` (do not commit it). The repository tracks only `config.example.yaml`.
+Prompt template for LiteLLM analysis also lives in `config.yaml` under `analysis.prompt_template`, and should require output in `{analysis_language}`.
+If `active_provider` is set to `agent`, no external key is required and interpretation runs in agent mode.
+The config file is intentionally minimal. Most provider defaults (such as base URL and key env names) are built into `scripts/moltbook_digest.py`.
+
+Auto-selection behavior:
+
+- If `active_provider=agent` and `--analysis-mode none`, the script automatically runs agent interpretation mode.
+- If `active_provider` is an external provider and `--analysis-mode none`, the script automatically runs LiteLLM mode.
+- If no provider is configured, `--analysis-mode none` keeps collection-only behavior.
+
+Example:
+
+```bash
+python3 scripts/moltbook_digest.py \
+  --query "how agents handle memory" \
+  --query "persistent memory architectures for agents" \
+  --analysis-mode litellm \
+  --litellm-model "openai/gpt-4.1-mini" \
+  --analysis-question "What durable design patterns and failure modes emerge from these discussions?"
+```
+
+Outputs added to the run folder:
+
+- `analysis_input.md` (structured context passed to the model)
+- `analysis_report.md` (LLM-generated deep analysis)
+
+Important:
+
+- Keep `--analysis-post-char-limit` and `--analysis-context-char-limit` high enough for deep analysis.
+- If the LLM call fails because context is too large, reduce `--max-posts` or `--comment-limit` first, then tune the analysis limits.
+
+### Mode B: Agent (direct interpretation by your agent)
+
+Use this when the user wants their own agent to perform interpretation, without wiring an external LLM API in the script.
+
+Example:
+
+```bash
+python3 scripts/moltbook_digest.py \
+  --query "agent memory governance" \
+  --analysis-mode agent \
+  --analysis-question "What are the core governance disagreements and practical policy implications?"
+```
+
+Outputs added to the run folder:
+
+- `analysis_input.md` (full analysis context)
+- `agent_handoff.md` (copy-paste prompt and report requirements for your agent)
+
+`agent_handoff.md` is intentionally explicit about evidence standards, uncertainty handling, and required report structure.
 
 ### 5. Deliver a complete report
 

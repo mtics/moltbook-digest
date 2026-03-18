@@ -1,0 +1,68 @@
+version: 1
+
+security:
+  note: "Fill real API keys locally. Never commit real keys to git."
+
+analysis:
+  # Available placeholders:
+  # {analysis_question}, {analysis_language}, {report_structure}, {analysis_input}
+  prompt_template: |
+    Research question: {analysis_question}
+    User preferred language: {analysis_language}
+    Hard requirement: You MUST write the final report in {analysis_language}.
+
+    Write a deep analytical report.
+    Recommended structure:
+    {report_structure}
+
+    Evidence corpus:
+    {analysis_input}
+
+
+# options: agent | openai | claude | gemini | siliconflow | minimax | volcengine
+active_provider: "agent"
+
+
+providers:
+  # Agent mode: no external LLM call, script will produce analysis_input.md + agent_handoff.md
+  agent:
+    enabled: true
+
+  # External providers: only keep fields you usually change.
+  # Defaults (api_base, key env name) are built into code.
+  openai:
+    enabled: false
+    api_key: "<OPENAI_API_KEY>"
+    model: "openai/gpt-4.1-mini"
+
+  claude:
+    enabled: false
+    api_key: "<ANTHROPIC_API_KEY>"
+    model: "anthropic/claude-3-7-sonnet-latest"
+
+  gemini:
+    enabled: false
+    api_key: "<GEMINI_API_KEY>"
+    model: "gemini/gemini-2.0-flash"
+
+  siliconflow:
+    enabled: false
+    api_key: "<SILICONFLOW_API_KEY>"
+    model: "openai/Qwen/Qwen2.5-72B-Instruct"
+
+  minimax:
+    enabled: false
+    api_key: "<MINIMAX_API_KEY>"
+    model: "openai/MiniMax-Text-01"
+
+  volcengine:
+    enabled: false
+    api_key: "<ARK_API_KEY>"
+    model: "openai/doubao-1.5-pro-32k-250115"
+
+# Optional advanced overrides (add only when needed):
+# providers:
+#   openai:
+#     api_key_env: "OPENAI_API_KEY"
+#     api_base: "https://api.openai.com/v1"
+#     system_prompt: "Custom system prompt"

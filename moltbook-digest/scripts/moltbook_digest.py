@@ -21,6 +21,68 @@ DEFAULT_BASE_URL = "https://www.moltbook.com/api/v1"
 DEFAULT_SITE_URL = "https://www.moltbook.com"
 TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
+DEFAULT_ANALYSIS_SYSTEM_PROMPT = (
+    "You are a rigorous Moltbook research analyst. Use only the provided evidence, avoid hallucinations, "
+    "distinguish facts from inference, and explicitly call out uncertainty and data limits."
+)
+DEFAULT_ANALYSIS_PROMPT_TEMPLATE = """Research question: {analysis_question}
+User preferred language: {analysis_language}
+Hard requirement: Write the final report in {analysis_language}.
+
+Write a deep analytical report.
+Recommended structure:
+{report_structure}
+
+Evidence corpus:
+{analysis_input}
+"""
+DEFAULT_REPORT_STRUCTURE = "\n".join(
+    [
+        "1. Executive summary",
+        "2. Major themes with supporting evidence",
+        "3. Disagreements and competing assumptions",
+        "4. Blind spots and confidence assessment",
+        "5. Concrete next actions and follow-up queries",
+    ]
+)
+DEFAULT_LLM_CONFIG_PATH = "config.yaml"
+SUPPORTED_PROVIDERS = (
+    "agent",
+    "openai",
+    "claude",
+    "gemini",
+    "siliconflow",
+    "minimax",
+    "volcengine",
+)
+PROVIDER_DEFAULTS = {
+    "agent": {"analysis_mode": "agent"},
+    "openai": {"analysis_mode": "litellm", "model": "openai/gpt-4.1-mini", "api_key_env": "OPENAI_API_KEY"},
+    "claude": {
+        "analysis_mode": "litellm",
+        "model": "anthropic/claude-3-7-sonnet-latest",
+        "api_key_env": "ANTHROPIC_API_KEY",
+    },
+    "gemini": {"analysis_mode": "litellm", "model": "gemini/gemini-2.0-flash", "api_key_env": "GEMINI_API_KEY"},
+    "siliconflow": {
+        "analysis_mode": "litellm",
+        "model": "openai/Qwen/Qwen2.5-72B-Instruct",
+        "api_key_env": "SILICONFLOW_API_KEY",
+        "api_base": "https://api.siliconflow.cn/v1",
+    },
+    "minimax": {
+        "analysis_mode": "litellm",
+        "model": "openai/MiniMax-Text-01",
+        "api_key_env": "MINIMAX_API_KEY",
+        "api_base": "https://api.minimax.chat/v1",
+    },
+    "volcengine": {
+        "analysis_mode": "litellm",
+        "model": "openai/doubao-1.5-pro-32k-250115",
+        "api_key_env": "ARK_API_KEY",
+        "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+    },
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +159,88 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="HTTP timeout in seconds.",
     )
+    parser.add_argument(
+        "--analysis-mode",
+        choices=("none", "litellm", "agent", "both"),
+        default="none",
+        help="How to interpret collected content: none, litellm, agent, or both.",
+    )
+    parser.add_argument(
+        "--analysis-question",
+        help="Optional research question the interpretation should answer.",
+    )
+    parser.add_argument(
+        "--analysis-language",
+        default="zh-CN",
+        help="Preferred language for analysis output.",
+    )
+    parser.add_argument(
+        "--analysis-input-name",
+        default="analysis_input.md",
+        help="Filename for structured analysis context.",
+    )
+    parser.add_argument(
+        "--analysis-output-name",
+        default="analysis_report.md",
+        help="Filename for LLM-generated analysis report.",
+    )
+    parser.add_argument(
+        "--agent-handoff-name",
+        default="agent_handoff.md",
+        help="Filename for the handoff prompt used in agent interpretation mode.",
+    )
+    parser.add_argument(
+        "--analysis-comment-evidence-limit",
+        type=int,
+        default=12,
+        help="Representative comments per post for analysis context.",
+    )
+    parser.add_argument(
+        "--analysis-post-char-limit",
+        type=int,
+        default=12000,
+        help="Character budget per post body in LLM mode; use 0 for no cap.",
+    )
+    parser.add_argument(
+        "--analysis-context-char-limit",
+        type=int,
+        default=180000,
+        help="Total character budget for LLM input context; use 0 for no cap.",
+    )
+    parser.add_argument(
+        "--litellm-model",
+        default=os.environ.get("LITELLM_MODEL"),
+        help="Model name passed to LiteLLM, e.g. openai/gpt-4.1-mini.",
+    )
+    parser.add_argument(
+        "--litellm-temperature",
+        type=float,
+        default=0.2,
+        help="Temperature for LiteLLM completion.",
+    )
+    parser.add_argument(
+        "--litellm-max-tokens",
+        type=int,
+        default=2800,
+        help="Max output tokens for LiteLLM completion.",
+    )
+    parser.add_argument(
+        "--litellm-system-prompt",
+        default=os.environ.get("MOLTBOOK_ANALYSIS_SYSTEM_PROMPT", DEFAULT_ANALYSIS_SYSTEM_PROMPT),
+        help="System prompt used by LiteLLM analysis mode.",
+    )
+    parser.add_argument(
+        "--llm-config",
+        "--config",
+        dest="llm_config",
+        default=DEFAULT_LLM_CONFIG_PATH,
+        help="Path to config.yaml (used to resolve provider defaults and prompt template).",
+    )
+    parser.add_argument(
+        "--active-provider",
+        choices=SUPPORTED_PROVIDERS,
+        help="Override provider from config file. If omitted, uses active_provider in config.",
+    )
     return parser.parse_args()
 
 
@@ -110,10 +254,108 @@ def one_line(text: str) -> str:
     return WHITESPACE_RE.sub(" ", text).strip()
 
 
+def is_secret_placeholder(value: Any) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    if not text:
+        return True
+    return text.startswith("<") and text.endswith(">")
+
+
 def clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."
+
+
+def load_yaml_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise SystemExit("PyYAML is required to read llm config. Install with: pip install pyyaml") from exc
+
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"Failed to parse llm config {path}: {exc}") from exc
+
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise SystemExit(f"llm config {path} must be a mapping at the top level.")
+    return payload
+
+
+def resolve_active_provider(args: argparse.Namespace, llm_config: dict[str, Any]) -> str:
+    if args.active_provider:
+        return args.active_provider
+
+    top_level = llm_config.get("active_provider")
+    if isinstance(top_level, str) and top_level in SUPPORTED_PROVIDERS:
+        return top_level
+
+    defaults = llm_config.get("defaults") or {}
+    default_provider = defaults.get("active_provider")
+    if isinstance(default_provider, str) and default_provider in SUPPORTED_PROVIDERS:
+        return default_provider
+
+    return "agent"
+
+
+def get_provider_config(llm_config: dict[str, Any], provider: str) -> dict[str, Any]:
+    providers = llm_config.get("providers") or {}
+    if isinstance(providers, dict):
+        config = providers.get(provider) or {}
+        if isinstance(config, dict):
+            return config
+    return {}
+
+
+def resolve_provider_runtime(args: argparse.Namespace, llm_config: dict[str, Any]) -> dict[str, Any]:
+    provider = resolve_active_provider(args, llm_config)
+    preset = PROVIDER_DEFAULTS.get(provider, {})
+    provider_cfg = get_provider_config(llm_config, provider)
+    analysis_cfg = llm_config.get("analysis") if isinstance(llm_config.get("analysis"), dict) else {}
+    has_provider_setting = bool(args.active_provider)
+    if not has_provider_setting:
+        has_provider_setting = isinstance(llm_config.get("active_provider"), str)
+    if not has_provider_setting:
+        defaults = llm_config.get("defaults") or {}
+        has_provider_setting = isinstance(defaults.get("active_provider"), str)
+
+    runtime_mode = args.analysis_mode
+    if runtime_mode == "none" and has_provider_setting:
+        runtime_mode = preset.get("analysis_mode", "none")
+
+    model = args.litellm_model or provider_cfg.get("model") or preset.get("model")
+    api_base = provider_cfg.get("api_base") or preset.get("api_base")
+    api_key_env = provider_cfg.get("api_key_env") or preset.get("api_key_env")
+    raw_api_key = provider_cfg.get("api_key")
+    api_key = None if is_secret_placeholder(raw_api_key) else str(raw_api_key).strip()
+    if not api_key and isinstance(api_key_env, str) and api_key_env:
+        api_key = os.environ.get(api_key_env)
+
+    system_prompt = args.litellm_system_prompt
+    cfg_system_prompt = provider_cfg.get("system_prompt")
+    if cfg_system_prompt and args.litellm_system_prompt == DEFAULT_ANALYSIS_SYSTEM_PROMPT:
+        system_prompt = str(cfg_system_prompt)
+    prompt_template = analysis_cfg.get("prompt_template") or provider_cfg.get("prompt_template")
+    if not prompt_template:
+        prompt_template = DEFAULT_ANALYSIS_PROMPT_TEMPLATE
+
+    return {
+        "provider": provider,
+        "analysis_mode": runtime_mode,
+        "litellm_model": model,
+        "litellm_api_base": api_base,
+        "litellm_api_key": api_key,
+        "litellm_api_key_env": api_key_env,
+        "litellm_system_prompt": system_prompt,
+        "analysis_prompt_template": str(prompt_template),
+    }
 
 
 def slugify(value: str) -> str:
@@ -560,6 +802,240 @@ def render_markdown(pack: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def resolve_analysis_question(args: argparse.Namespace) -> str:
+    if args.analysis_question:
+        return clean_text(args.analysis_question)
+    return clean_text(
+        "Analyze Moltbook discussions around: "
+        + ", ".join(args.queries)
+        + ". Extract core themes, disagreements, risks, and practical actions."
+    )
+
+
+def apply_char_cap(text: str, limit: int, label: str) -> tuple[str, bool]:
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+    capped = text[:limit].rstrip()
+    note = f"\n\n[TRUNCATED {label}: original {len(text)} chars, capped at {limit} chars]"
+    return capped + note, True
+
+
+def select_analysis_comments(comment_tree: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    flat = flatten_comments(comment_tree)
+    if not flat:
+        return []
+    if limit <= 0 or len(flat) <= limit:
+        return sorted(
+            flat,
+            key=lambda item: (item.get("score", 0), parse_iso(item.get("created_at"))),
+            reverse=True,
+        )
+    return select_comment_samples(flat, limit)
+
+
+def render_analysis_input(pack: dict[str, Any], args: argparse.Namespace, for_litellm: bool) -> str:
+    lines: list[str] = []
+    stats = pack["stats"]
+    question = resolve_analysis_question(args)
+
+    lines.append("# Moltbook Analysis Input")
+    lines.append("")
+    lines.append(f"- Research question: {question}")
+    lines.append(f"- Preferred report language: `{args.analysis_language}`")
+    lines.append(f"- Queries: {', '.join(f'`{query}`' for query in stats['queries'])}")
+    lines.append(f"- Expanded posts: `{stats['selected_posts']}`")
+    lines.append(f"- Raw search hits: `{stats['raw_search_hits']}`")
+    lines.append("")
+    lines.append("## Method Reminder")
+    lines.append("")
+    lines.append("- Use only the evidence in this file.")
+    lines.append("- Separate direct evidence from inference.")
+    lines.append("- Call out blind spots and confidence limits.")
+    lines.append("")
+    lines.append("## Evidence Corpus")
+    lines.append("")
+
+    for index, item in enumerate(pack["posts"], start=1):
+        post = item["post"]
+        comments = item["comments"]
+        lines.append(f"### Post {index}: {post['title'] or '(untitled)'}")
+        lines.append("")
+        lines.append(f"- Post ID: `{post['id']}`")
+        lines.append(f"- URL: {post['url']}")
+        lines.append(f"- Author: `{post['author']['name'] or 'unknown'}`")
+        lines.append(f"- Submolt: `{post['submolt']['name'] or 'unknown'}`")
+        lines.append(f"- Score / comments: `{post['score']}` / `{post['comment_count']}`")
+        lines.append(f"- Matched queries: {', '.join(f'`{query}`' for query in post['matched_queries'])}")
+        lines.append("")
+        body = post["content"] or ""
+        if for_litellm:
+            body, _ = apply_char_cap(body, args.analysis_post_char_limit, "post body")
+        lines.append("Post body:")
+        lines.append("")
+        lines.append("```text")
+        lines.append(body)
+        lines.append("```")
+        lines.append("")
+
+        sampled_comments = select_analysis_comments(comments["items"], args.analysis_comment_evidence_limit)
+        lines.append(f"Representative comments for analysis (`{len(sampled_comments)}`):")
+        if not sampled_comments:
+            lines.append("- No comments available.")
+            lines.append("")
+            continue
+
+        for sample in sampled_comments:
+            lines.append(
+                f"- Comment `{sample['id']}` depth=`{sample['depth']}` "
+                f"score=`{sample['score']}` author=`{sample['author_name'] or 'unknown'}`"
+            )
+            comment_body = sample["content"] or ""
+            if for_litellm:
+                comment_body, _ = apply_char_cap(comment_body, 1500, "comment body")
+            lines.append("")
+            lines.append("```text")
+            lines.append(comment_body)
+            lines.append("```")
+        lines.append("")
+
+    rendered = "\n".join(lines)
+    if for_litellm:
+        rendered, _ = apply_char_cap(
+            rendered,
+            args.analysis_context_char_limit,
+            "analysis context",
+        )
+    return rendered
+
+
+def extract_litellm_text(response: Any) -> str:
+    if isinstance(response, dict):
+        choices = response.get("choices") or []
+        if choices:
+            message = choices[0].get("message") or {}
+            content = message.get("content")
+            return str(content or "").strip()
+
+    choices = getattr(response, "choices", None)
+    if choices:
+        message = getattr(choices[0], "message", None)
+        if message:
+            content = getattr(message, "content", "")
+            return str(content or "").strip()
+    return ""
+
+
+def build_analysis_prompt(question: str, language: str, analysis_input_text: str, template: str) -> str:
+    try:
+        return template.format(
+            analysis_question=question,
+            analysis_language=language,
+            report_structure=DEFAULT_REPORT_STRUCTURE,
+            analysis_input=analysis_input_text,
+        )
+    except KeyError as exc:
+        missing = str(exc).strip("'")
+        raise SystemExit(
+            "Invalid prompt_template in config: missing placeholder "
+            f"{{{missing}}}. Allowed placeholders are "
+            "{analysis_question}, {analysis_language}, {report_structure}, {analysis_input}."
+        ) from exc
+
+
+def run_litellm_analysis(args: argparse.Namespace, analysis_input_text: str, runtime: dict[str, Any]) -> str:
+    try:
+        from litellm import completion  # type: ignore
+    except ImportError as exc:
+        raise SystemExit(
+            "LiteLLM is required for --analysis-mode litellm/both. Install with: pip install litellm"
+        ) from exc
+
+    question = resolve_analysis_question(args)
+    prompt = build_analysis_prompt(
+        question,
+        args.analysis_language,
+        analysis_input_text,
+        runtime.get("analysis_prompt_template") or DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+    )
+
+    try:
+        response = completion(
+            model=runtime["litellm_model"],
+            temperature=args.litellm_temperature,
+            max_tokens=args.litellm_max_tokens,
+            api_base=runtime.get("litellm_api_base"),
+            api_key=runtime.get("litellm_api_key"),
+            messages=[
+                {"role": "system", "content": runtime.get("litellm_system_prompt") or args.litellm_system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+        )
+    except Exception as exc:
+        raise SystemExit(f"LiteLLM analysis call failed: {exc}") from exc
+
+    content = extract_litellm_text(response).strip()
+    if not content:
+        raise SystemExit("LiteLLM returned an empty analysis response.")
+
+    header = "\n".join(
+        [
+            "# Moltbook Analysis Report",
+            "",
+            f"- Generated at: `{datetime.now(timezone.utc).isoformat()}`",
+            f"- Mode: `litellm`",
+            f"- Provider: `{runtime.get('provider')}`",
+            f"- Model: `{runtime.get('litellm_model')}`",
+            f"- Language: `{args.analysis_language}`",
+            "",
+        ]
+    )
+    return header + content + "\n"
+
+
+def render_agent_handoff(args: argparse.Namespace) -> str:
+    question = resolve_analysis_question(args)
+    lines = [
+        "# Agent Handoff for Deep Interpretation",
+        "",
+        "## Objective",
+        "",
+        question,
+        "",
+        "## Files to read",
+        "",
+        f"- `{args.analysis_input_name}`",
+        "- `brief.md`",
+        "- `evidence.json`",
+        "",
+        "## Required output",
+        "",
+        f"- Write `{args.analysis_output_name}` in `{args.analysis_language}`.",
+        "- Use explicit evidence references (post id, author, or direct excerpt).",
+        "- Distinguish evidence from inference.",
+        "- Identify tensions, contradictions, and open questions.",
+        "- End with concrete, prioritized next actions.",
+        "",
+        "## Suggested report structure",
+        "",
+        "1. Executive summary",
+        "2. Theme map",
+        "3. Disagreements and assumption conflicts",
+        "4. Confidence and blind spots",
+        "5. Actionable recommendations",
+        "",
+        "## Copy-paste prompt",
+        "",
+        "```text",
+        f"Please read {args.analysis_input_name}, brief.md, and evidence.json. "
+        f"Then generate {args.analysis_output_name} in {args.analysis_language}. "
+        "Do deep analysis (not simple summary), cite evidence, separate facts from inference, "
+        "and end with prioritized actions.",
+        "```",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def default_output_dir(queries: list[str]) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
     slug = slugify("-".join(queries)[:48])
@@ -586,11 +1062,41 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--comment-limit must be between 1 and 100")
     if not args.base_url.startswith("https://www.moltbook.com"):
         raise SystemExit("--base-url must point at https://www.moltbook.com")
+    if args.analysis_comment_evidence_limit < 1:
+        raise SystemExit("--analysis-comment-evidence-limit must be >= 1")
+    if args.analysis_post_char_limit < 0:
+        raise SystemExit("--analysis-post-char-limit must be >= 0")
+    if args.analysis_context_char_limit < 0:
+        raise SystemExit("--analysis-context-char-limit must be >= 0")
+    if args.litellm_temperature < 0 or args.litellm_temperature > 2:
+        raise SystemExit("--litellm-temperature must be between 0 and 2")
+    if args.litellm_max_tokens < 64:
+        raise SystemExit("--litellm-max-tokens must be >= 64")
+
+
+def validate_runtime(args: argparse.Namespace, runtime: dict[str, Any]) -> None:
+    mode = runtime["analysis_mode"]
+    if mode in ("litellm", "both") and not runtime.get("analysis_prompt_template"):
+        raise SystemExit("LiteLLM mode requires analysis prompt template. Set analysis.prompt_template in config.")
+    if mode in ("litellm", "both") and not runtime.get("litellm_model"):
+        raise SystemExit(
+            "LiteLLM mode requires a model. Set --litellm-model or configure model in config providers.<name>.model"
+        )
+    if mode in ("litellm", "both") and runtime.get("provider") != "agent":
+        if not runtime.get("litellm_api_key"):
+            env_name = runtime.get("litellm_api_key_env") or "provider API key env var"
+            raise SystemExit(
+                f"{runtime.get('provider')} requires API key. Set providers.{runtime.get('provider')}.api_key "
+                f"or export {env_name}."
+            )
 
 
 def main() -> int:
     args = parse_args()
     validate_args(args)
+    llm_config = load_yaml_file(Path(args.llm_config))
+    runtime = resolve_provider_runtime(args, llm_config)
+    validate_runtime(args, runtime)
 
     search_hits = collect_search_hits(args)
     if not search_hits:
@@ -611,9 +1117,27 @@ def main() -> int:
 
     output_dir = Path(args.output_dir) if args.output_dir else default_output_dir(args.queries)
     json_path, brief_path = write_outputs(pack, output_dir)
-
     print(f"Wrote {brief_path}")
     print(f"Wrote {json_path}")
+
+    if runtime["analysis_mode"] != "none":
+        analysis_input_path = output_dir / args.analysis_input_name
+        analysis_input_text = render_analysis_input(pack, args, for_litellm=False)
+        analysis_input_path.write_text(analysis_input_text + "\n", encoding="utf-8")
+        print(f"Wrote {analysis_input_path}")
+
+        if runtime["analysis_mode"] in ("litellm", "both"):
+            llm_input = render_analysis_input(pack, args, for_litellm=True)
+            report_text = run_litellm_analysis(args, llm_input, runtime)
+            analysis_report_path = output_dir / args.analysis_output_name
+            analysis_report_path.write_text(report_text, encoding="utf-8")
+            print(f"Wrote {analysis_report_path}")
+
+        if runtime["analysis_mode"] in ("agent", "both"):
+            handoff_path = output_dir / args.agent_handoff_name
+            handoff_path.write_text(render_agent_handoff(args) + "\n", encoding="utf-8")
+            print(f"Wrote {handoff_path}")
+
     return 0
 
 
