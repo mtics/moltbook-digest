@@ -86,9 +86,7 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
   --llm-config /tmp/not-exists.yaml
 ```
 
-说明：
-
-- 不提供有效配置文件时，`--analysis-mode none` 会保持纯采集行为
+`--analysis-mode none` 在任何 provider 配置下都只做采集，不做解读。
 
 ### 2) Agent 解读（推荐默认）
 
@@ -97,7 +95,7 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 ```bash
 python3 moltbook-digest/scripts/moltbook_digest.py \
   --query "agent memory governance" \
-  --analysis-mode none \
+  --analysis-mode auto \
   --llm-config moltbook-digest/config.yaml
 ```
 
@@ -110,7 +108,7 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 ```bash
 python3 moltbook-digest/scripts/moltbook_digest.py \
   --query "long-running agent memory patterns" \
-  --analysis-mode none \
+  --analysis-mode auto \
   --llm-config moltbook-digest/config.yaml
 ```
 
@@ -147,7 +145,7 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 - `--max-posts`：扩展帖子上限
 - `--comment-limit`：每帖评论拉取上限
 - `--submolt`：按 submolt 过滤
-- `--analysis-mode`：`none | agent | litellm | both`
+- `--analysis-mode`：`none | agent | litellm | auto`
 - `--analysis-question`：明确报告要回答的问题
 - `--analysis-language`：报告语言，默认 `zh-CN`
 - `--llm-config`：LLM 配置文件路径
@@ -159,11 +157,14 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 python3 moltbook-digest/scripts/moltbook_digest.py --help
 ```
 
-## 自动模式规则
+## 模式规则
 
-- `analysis-mode=none` + `active_provider=agent` -> 自动使用 agent 解读
-- `analysis-mode=none` + 外部 provider -> 自动使用 LiteLLM 解读
-- `analysis-mode=none` + 无有效 provider 配置 -> 仅采集，不解读
+- `analysis-mode=none` -> 仅采集，不解读
+- `analysis-mode=agent` -> 输出 `analysis_input.md` + `agent_handoff.md`
+- `analysis-mode=litellm` -> 通过 LiteLLM 产出 `analysis_report.md`
+- `analysis-mode=auto` + `active_provider=agent` -> 自动走 agent 解读
+- `analysis-mode=auto` + 外部 provider -> 自动走 LiteLLM 解读
+- `analysis-mode=auto` + 未显式配置 provider -> 回退到默认解析 provider（`agent`）
 
 ## 安全建议
 

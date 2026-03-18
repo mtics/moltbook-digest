@@ -86,7 +86,7 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
   --llm-config /tmp/not-exists.yaml
 ```
 
-Without a valid config, `--analysis-mode none` remains pure collection.
+`--analysis-mode none` always remains pure collection, regardless of provider settings.
 
 ### 2) Agent interpretation (recommended default)
 
@@ -95,7 +95,7 @@ With `active_provider: agent` in `config.yaml`:
 ```bash
 python3 moltbook-digest/scripts/moltbook_digest.py \
   --query "agent memory governance" \
-  --analysis-mode none \
+  --analysis-mode auto \
   --llm-config moltbook-digest/config.yaml
 ```
 
@@ -108,7 +108,7 @@ Set an external provider (for example `openai`) and fill key(s):
 ```bash
 python3 moltbook-digest/scripts/moltbook_digest.py \
   --query "long-running agent memory patterns" \
-  --analysis-mode none \
+  --analysis-mode auto \
   --llm-config moltbook-digest/config.yaml
 ```
 
@@ -145,7 +145,7 @@ Core files:
 - `--max-posts`: cap expanded posts
 - `--comment-limit`: cap comments fetched per post
 - `--submolt`: submolt filter
-- `--analysis-mode`: `none | agent | litellm | both`
+- `--analysis-mode`: `none | agent | litellm | auto`
 - `--analysis-question`: target question the report must answer
 - `--analysis-language`: output language, default `zh-CN`
 - `--llm-config`: LLM config file path
@@ -157,11 +157,14 @@ Full parameter list:
 python3 moltbook-digest/scripts/moltbook_digest.py --help
 ```
 
-## Auto Mode Rules
+## Analysis Mode Rules
 
-- `analysis-mode=none` + `active_provider=agent` -> auto agent interpretation
-- `analysis-mode=none` + external provider -> auto LiteLLM interpretation
-- `analysis-mode=none` + no valid provider config -> collection only
+- `analysis-mode=none` -> collection only (no interpretation)
+- `analysis-mode=agent` -> write `analysis_input.md` + `agent_handoff.md`
+- `analysis-mode=litellm` -> run LiteLLM and write `analysis_report.md`
+- `analysis-mode=auto` + `active_provider=agent` -> auto agent interpretation
+- `analysis-mode=auto` + external provider -> auto LiteLLM interpretation
+- `analysis-mode=auto` + no explicit provider -> fallback to resolved default provider (`agent`)
 
 ## Security
 

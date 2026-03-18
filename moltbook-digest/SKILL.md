@@ -137,9 +137,10 @@ The config file is intentionally minimal. Most provider defaults (such as base U
 
 Auto-selection behavior:
 
-- If `active_provider=agent` and `--analysis-mode none`, the script automatically runs agent interpretation mode.
-- If `active_provider` is an external provider and `--analysis-mode none`, the script automatically runs LiteLLM mode.
-- If no provider is configured, `--analysis-mode none` keeps collection-only behavior.
+- `--analysis-mode none` always keeps collection-only behavior.
+- If `--analysis-mode auto` and `active_provider=agent`, the script runs agent interpretation mode.
+- If `--analysis-mode auto` and `active_provider` is an external provider, the script runs LiteLLM mode.
+- If `--analysis-mode auto` and provider is not explicitly configured, the script falls back to the resolved default provider (`agent`).
 
 Example:
 

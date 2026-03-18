@@ -161,9 +161,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--analysis-mode",
-        choices=("none", "litellm", "agent", "both"),
+        choices=("none", "litellm", "agent", "auto"),
         default="none",
-        help="How to interpret collected content: none, litellm, agent, or both.",
+        help="How to interpret collected content: none, litellm, agent, or auto.",
     )
     parser.add_argument(
         "--analysis-question",
@@ -319,15 +319,8 @@ def resolve_provider_runtime(args: argparse.Namespace, llm_config: dict[str, Any
     preset = PROVIDER_DEFAULTS.get(provider, {})
     provider_cfg = get_provider_config(llm_config, provider)
     analysis_cfg = llm_config.get("analysis") if isinstance(llm_config.get("analysis"), dict) else {}
-    has_provider_setting = bool(args.active_provider)
-    if not has_provider_setting:
-        has_provider_setting = isinstance(llm_config.get("active_provider"), str)
-    if not has_provider_setting:
-        defaults = llm_config.get("defaults") or {}
-        has_provider_setting = isinstance(defaults.get("active_provider"), str)
-
     runtime_mode = args.analysis_mode
-    if runtime_mode == "none" and has_provider_setting:
+    if runtime_mode == "auto":
         runtime_mode = preset.get("analysis_mode", "none")
 
     model = args.litellm_model or provider_cfg.get("model") or preset.get("model")
@@ -946,9 +939,7 @@ def run_litellm_analysis(args: argparse.Namespace, analysis_input_text: str, run
     try:
         from litellm import completion  # type: ignore
     except ImportError as exc:
-        raise SystemExit(
-            "LiteLLM is required for --analysis-mode litellm/both. Install with: pip install litellm"
-        ) from exc
+        raise SystemExit("LiteLLM is required for LiteLLM analysis. Install with: pip install litellm") from exc
 
     question = resolve_analysis_question(args)
     prompt = build_analysis_prompt(
@@ -1076,13 +1067,13 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def validate_runtime(args: argparse.Namespace, runtime: dict[str, Any]) -> None:
     mode = runtime["analysis_mode"]
-    if mode in ("litellm", "both") and not runtime.get("analysis_prompt_template"):
+    if mode == "litellm" and not runtime.get("analysis_prompt_template"):
         raise SystemExit("LiteLLM mode requires analysis prompt template. Set analysis.prompt_template in config.")
-    if mode in ("litellm", "both") and not runtime.get("litellm_model"):
+    if mode == "litellm" and not runtime.get("litellm_model"):
         raise SystemExit(
             "LiteLLM mode requires a model. Set --litellm-model or configure model in config providers.<name>.model"
         )
-    if mode in ("litellm", "both") and runtime.get("provider") != "agent":
+    if mode == "litellm" and runtime.get("provider") != "agent":
         if not runtime.get("litellm_api_key"):
             env_name = runtime.get("litellm_api_key_env") or "provider API key env var"
             raise SystemExit(
@@ -1126,14 +1117,14 @@ def main() -> int:
         analysis_input_path.write_text(analysis_input_text + "\n", encoding="utf-8")
         print(f"Wrote {analysis_input_path}")
 
-        if runtime["analysis_mode"] in ("litellm", "both"):
+        if runtime["analysis_mode"] == "litellm":
             llm_input = render_analysis_input(pack, args, for_litellm=True)
             report_text = run_litellm_analysis(args, llm_input, runtime)
             analysis_report_path = output_dir / args.analysis_output_name
             analysis_report_path.write_text(report_text, encoding="utf-8")
             print(f"Wrote {analysis_report_path}")
 
-        if runtime["analysis_mode"] in ("agent", "both"):
+        if runtime["analysis_mode"] == "agent":
             handoff_path = output_dir / args.agent_handoff_name
             handoff_path.write_text(render_agent_handoff(args) + "\n", encoding="utf-8")
             print(f"Wrote {handoff_path}")

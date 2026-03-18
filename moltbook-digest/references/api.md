@@ -166,6 +166,7 @@ The current script supports two interpretation paths after collection:
 
 - If you need deterministic script-side interpretation, choose LiteLLM.
 - If you need higher flexibility or custom orchestration, choose agent mode.
-- If unsure, run with `--analysis-mode both` and compare outputs.
+- If you want provider-based routing, run with `--analysis-mode auto`.
+- If you want pure collection only, run with `--analysis-mode none`.
 - You can set `active_provider` in `config.yaml`; code-level defaults fill most provider details so config stays minimal.
 - `analysis.prompt_template` in `config.yaml` controls LiteLLM prompting and should explicitly require output in `{analysis_language}`.
