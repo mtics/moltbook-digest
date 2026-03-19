@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from html import unescape
@@ -25,11 +26,40 @@ DEFAULT_ANALYSIS_SYSTEM_PROMPT = (
     "You are a rigorous Moltbook research analyst. Use only the provided evidence, avoid hallucinations, "
     "distinguish facts from inference, and explicitly call out uncertainty and data limits."
 )
+DEFAULT_ANALYSIS_LANGUAGE = "zh-CN"
+DEFAULT_ANALYSIS_QUESTION_TEMPLATE = (
+    "Analyze Moltbook discussions around: {queries}. "
+    "Extract core themes, disagreements, risks, and practical actions."
+)
 DEFAULT_ANALYSIS_PROMPT_TEMPLATE = """Research question: {analysis_question}
 User preferred language: {analysis_language}
 Hard requirement: Write the final report in {analysis_language}.
 
-Write a deep analytical report.
+You must follow this workflow:
+1) First summarize the corpus before deep analysis:
+   - For each key post, extract its central claim and evidence style.
+   - Then extract common patterns and unique differences across posts.
+   - Organize per-post summaries in a Related Work style.
+   - For each work, cover problem setting, approach, contribution, and limitations.
+   - Explain how each work relates to the user problem and to other works.
+   - Use clickable markdown links for each work heading, pointing to the original post URL.
+   - Do not use placeholder labels like Work A, Work B, Work C without post links.
+   - Write per-post summaries in natural human language with clear flow.
+   - Use simple wording and varied sentence length.
+   - Avoid repetitive AI-style phrasing and unnecessary jargon.
+   - Do not use the em dash punctuation.
+2) Then apply first-principles reasoning:
+   - Restate the underlying user problem from goals/constraints/tradeoffs.
+   - Do not assume the user is fully clear about goals or path.
+   - If intent is ambiguous, explicitly list assumptions and alternative interpretation paths.
+3) Then perform deep interpretation:
+   - Separate evidence from inference.
+   - Explain causal mechanisms, not just conclusions.
+   - Highlight contradictions, blind spots, and confidence limits.
+4) End with actionable recommendations:
+   - Prioritized actions.
+   - What to ask the user next if key assumptions remain uncertain.
+
 Recommended structure:
 {report_structure}
 
@@ -38,11 +68,11 @@ Evidence corpus:
 """
 DEFAULT_REPORT_STRUCTURE = "\n".join(
     [
-        "1. Executive summary",
-        "2. Major themes with supporting evidence",
-        "3. Disagreements and competing assumptions",
-        "4. Blind spots and confidence assessment",
-        "5. Concrete next actions and follow-up queries",
+        "1. Corpus summary (per-post key points + commonalities + unique differences)",
+        "2. First-principles problem framing (goal, constraints, success criteria, assumptions)",
+        "3. Deep interpretation (mechanisms, tradeoffs, contradictions)",
+        "4. Confidence, blind spots, and uncertainty management",
+        "5. Prioritized actions and clarifying questions for the user",
     ]
 )
 DEFAULT_LLM_CONFIG_PATH = "config.yaml"
@@ -83,6 +113,25 @@ PROVIDER_DEFAULTS = {
         "api_base": "https://ark.cn-beijing.volces.com/api/v3",
     },
 }
+
+
+class ApiRequestError(RuntimeError):
+    """Recoverable API request error for per-item fault tolerance."""
+
+
+def init_diagnostics() -> dict[str, Any]:
+    return {
+        "search_request_failures": 0,
+        "post_fetch_failures": 0,
+        "comment_fetch_failures": 0,
+        "warnings": [],
+    }
+
+
+def add_warning(diagnostics: dict[str, Any], message: str) -> None:
+    warnings = diagnostics.setdefault("warnings", [])
+    if isinstance(warnings, list):
+        warnings.append(message)
 
 
 def parse_args() -> argparse.Namespace:
@@ -141,7 +190,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        help="Directory for brief.md and evidence.json. Defaults to output/moltbook-digest/<timestamp>-<slug>.",
+        help="Directory for output files. Defaults to output/moltbook-digest/<timestamp>-<slug>.",
+    )
+    parser.add_argument(
+        "--digest-name",
+        default="digest.md",
+        help="Filename for the unified markdown digest output.",
+    )
+    parser.add_argument(
+        "--evidence-name",
+        default="evidence.json",
+        help="Filename for structured JSON evidence output.",
     )
     parser.add_argument(
         "--base-url",
@@ -171,13 +230,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--analysis-language",
-        default="zh-CN",
-        help="Preferred language for analysis output.",
+        default=None,
+        help="Preferred language for analysis output. If omitted, uses analysis.default_language from config.",
     )
     parser.add_argument(
         "--analysis-input-name",
         default="analysis_input.md",
-        help="Filename for structured analysis context.",
+        help="Legacy filename for structured analysis context (written only with --emit-legacy-analysis-files).",
     )
     parser.add_argument(
         "--analysis-output-name",
@@ -187,7 +246,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--agent-handoff-name",
         default="agent_handoff.md",
-        help="Filename for the handoff prompt used in agent interpretation mode.",
+        help="Legacy filename for agent handoff prompt (written only with --emit-legacy-analysis-files).",
+    )
+    parser.add_argument(
+        "--emit-legacy-analysis-files",
+        action="store_true",
+        help="Also write legacy analysis_input.md and agent_handoff.md files for backward compatibility.",
     )
     parser.add_argument(
         "--analysis-comment-evidence-limit",
@@ -275,7 +339,10 @@ def load_yaml_file(path: Path) -> dict[str, Any]:
     try:
         import yaml  # type: ignore
     except ImportError as exc:
-        raise SystemExit("PyYAML is required to read llm config. Install with: pip install pyyaml") from exc
+        raise SystemExit(
+            "PyYAML is required to read llm config. Install dependencies with uv "
+            "(for example: uv sync --project moltbook-digest)."
+        ) from exc
 
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -338,6 +405,15 @@ def resolve_provider_runtime(args: argparse.Namespace, llm_config: dict[str, Any
     prompt_template = analysis_cfg.get("prompt_template") or provider_cfg.get("prompt_template")
     if not prompt_template:
         prompt_template = DEFAULT_ANALYSIS_PROMPT_TEMPLATE
+    question_template = analysis_cfg.get("question_template")
+    if not isinstance(question_template, str) or not question_template.strip():
+        question_template = DEFAULT_ANALYSIS_QUESTION_TEMPLATE
+    report_structure = analysis_cfg.get("report_structure")
+    if not isinstance(report_structure, str) or not report_structure.strip():
+        report_structure = DEFAULT_REPORT_STRUCTURE
+    default_language = analysis_cfg.get("default_language")
+    if not isinstance(default_language, str) or not default_language.strip():
+        default_language = DEFAULT_ANALYSIS_LANGUAGE
 
     return {
         "provider": provider,
@@ -348,6 +424,9 @@ def resolve_provider_runtime(args: argparse.Namespace, llm_config: dict[str, Any
         "litellm_api_key_env": api_key_env,
         "litellm_system_prompt": system_prompt,
         "analysis_prompt_template": str(prompt_template),
+        "analysis_question_template": str(question_template),
+        "analysis_report_structure": str(report_structure),
+        "analysis_default_language": str(default_language),
     }
 
 
@@ -368,6 +447,7 @@ def api_get(
     params: dict[str, Any] | None,
     api_key: str | None,
     timeout: int,
+    retries: int = 2,
 ) -> dict[str, Any]:
     query = urlencode({k: v for k, v in (params or {}).items() if v is not None})
     url = f"{base_url}{path}"
@@ -378,15 +458,29 @@ def api_get(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    request = Request(url, headers=headers, method="GET")
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(format_http_error(exc.code, message, url)) from exc
-    except URLError as exc:
-        raise SystemExit(f"Network error while requesting {url}: {exc.reason}") from exc
+    transient_http_codes = {408, 425, 429, 500, 502, 503, 504}
+    backoff_seconds = 0.8
+
+    for attempt in range(retries + 1):
+        request = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace")
+            should_retry = exc.code in transient_http_codes and attempt < retries
+            if should_retry:
+                time.sleep(backoff_seconds * (2**attempt))
+                continue
+            raise ApiRequestError(format_http_error(exc.code, message, url)) from exc
+        except URLError as exc:
+            should_retry = attempt < retries
+            if should_retry:
+                time.sleep(backoff_seconds * (2**attempt))
+                continue
+            raise ApiRequestError(f"Network error while requesting {url}: {exc.reason}") from exc
+
+    raise ApiRequestError(f"Request failed after retries: {url}")
 
 
 def format_http_error(code: int, body: str, url: str) -> str:
@@ -434,24 +528,33 @@ def normalize_hit(hit: dict[str, Any], query: str) -> dict[str, Any]:
     }
 
 
-def collect_search_hits(args: argparse.Namespace) -> list[dict[str, Any]]:
+def collect_search_hits(args: argparse.Namespace, diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
     all_hits: list[dict[str, Any]] = []
 
     for query in args.queries:
         cursor = None
-        for _ in range(args.pages):
-            payload = api_get(
-                args.base_url,
-                "/search",
-                {
-                    "q": query,
-                    "type": args.type,
-                    "limit": min(max(args.limit, 1), 50),
-                    "cursor": cursor,
-                },
-                args.api_key,
-                args.timeout,
-            )
+        for page_index in range(args.pages):
+            try:
+                payload = api_get(
+                    args.base_url,
+                    "/search",
+                    {
+                        "q": query,
+                        "type": args.type,
+                        "limit": min(max(args.limit, 1), 50),
+                        "cursor": cursor,
+                    },
+                    args.api_key,
+                    args.timeout,
+                )
+            except ApiRequestError as exc:
+                diagnostics["search_request_failures"] = int(diagnostics.get("search_request_failures", 0)) + 1
+                add_warning(
+                    diagnostics,
+                    f"Search request failed for query `{query}` page `{page_index + 1}`: {exc}",
+                )
+                break
+
             for hit in payload.get("results", []):
                 all_hits.append(normalize_hit(hit, query))
 
@@ -522,20 +625,20 @@ def sanitize_post(post: dict[str, Any], evidence: dict[str, Any]) -> dict[str, A
         "upvotes": post.get("upvotes", 0),
         "downvotes": post.get("downvotes", 0),
         "score": post.get("score", 0),
-        "comment_count": post.get("comment_count", 0),
+        "comment_count": post.get("comment_count", post.get("comments_count", 0)),
         "verification_status": post.get("verification_status"),
         "author": {
             "id": author.get("id"),
             "name": clean_text(author.get("name")),
             "description": clean_text(author.get("description")),
             "karma": author.get("karma"),
-            "follower_count": author.get("followerCount"),
-            "following_count": author.get("followingCount"),
+            "follower_count": author.get("followerCount", author.get("follower_count")),
+            "following_count": author.get("followingCount", author.get("following_count")),
         },
         "submolt": {
             "id": submolt.get("id"),
             "name": clean_text(submolt.get("name")),
-            "display_name": clean_text(submolt.get("display_name")),
+            "display_name": clean_text(submolt.get("display_name", submolt.get("displayName"))),
         },
         "url": f"{DEFAULT_SITE_URL}/post/{post.get('id')}",
         "matched_queries": evidence["matched_queries"],
@@ -624,7 +727,11 @@ def select_comment_samples(flat_comments: list[dict[str, Any]], limit: int = 5) 
     return selected
 
 
-def expand_posts(args: argparse.Namespace, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def expand_posts(
+    args: argparse.Namespace,
+    candidates: list[dict[str, Any]],
+    diagnostics: dict[str, Any],
+) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     allowed_submolts = {name.lower() for name in args.submolts}
 
@@ -632,37 +739,49 @@ def expand_posts(args: argparse.Namespace, candidates: list[dict[str, Any]]) -> 
         if len(selected) >= args.max_posts:
             break
 
-        post_payload = api_get(
-            args.base_url,
-            f"/posts/{candidate['post_id']}",
-            None,
-            args.api_key,
-            args.timeout,
-        )
+        try:
+            post_payload = api_get(
+                args.base_url,
+                f"/posts/{candidate['post_id']}",
+                None,
+                args.api_key,
+                args.timeout,
+            )
+        except ApiRequestError as exc:
+            diagnostics["post_fetch_failures"] = int(diagnostics.get("post_fetch_failures", 0)) + 1
+            add_warning(diagnostics, f"Skipped post `{candidate['post_id']}` because post detail fetch failed: {exc}")
+            continue
+
         post = post_payload.get("post") or {}
         submolt_name = clean_text(((post.get("submolt") or {}).get("name"))).lower()
         if allowed_submolts and submolt_name not in allowed_submolts:
             continue
 
-        comments_payload = api_get(
-            args.base_url,
-            f"/posts/{candidate['post_id']}/comments",
-            {"sort": args.comment_sort, "limit": args.comment_limit},
-            args.api_key,
-            args.timeout,
-        )
+        try:
+            comments_payload = api_get(
+                args.base_url,
+                f"/posts/{candidate['post_id']}/comments",
+                {"sort": args.comment_sort, "limit": args.comment_limit},
+                args.api_key,
+                args.timeout,
+            )
+        except ApiRequestError as exc:
+            diagnostics["comment_fetch_failures"] = int(diagnostics.get("comment_fetch_failures", 0)) + 1
+            add_warning(diagnostics, f"Post `{candidate['post_id']}` comments fetch failed; continuing with empty comments: {exc}")
+            comments_payload = {"sort": args.comment_sort, "count": 0, "has_more": False, "comments": []}
+
         cleaned_tree = sanitize_comment_tree(comments_payload.get("comments", []))
-        flat_comments = flatten_comments(cleaned_tree)
+        raw_comment_count = comments_payload.get("count")
+        comment_count = raw_comment_count if isinstance(raw_comment_count, int) else len(cleaned_tree)
 
         selected.append(
             {
                 "post": sanitize_post(post, candidate),
                 "comments": {
                     "sort": comments_payload.get("sort", args.comment_sort),
-                    "count": comments_payload.get("count", len(cleaned_tree)),
+                    "count": comment_count,
                     "has_more": comments_payload.get("has_more", False),
                     "items": cleaned_tree,
-                    "samples": select_comment_samples(flat_comments),
                 },
             }
         )
@@ -711,20 +830,48 @@ def build_stats(
     }
 
 
-def render_markdown(pack: dict[str, Any]) -> str:
+def render_markdown(
+    pack: dict[str, Any],
+    args: argparse.Namespace,
+    runtime: dict[str, Any],
+    digest_name: str,
+    evidence_name: str,
+) -> str:
     lines: list[str] = []
     stats = pack["stats"]
+    diagnostics = pack.get("diagnostics") or {}
+    warnings = diagnostics.get("warnings") if isinstance(diagnostics.get("warnings"), list) else []
+    mode = runtime.get("analysis_mode") or "none"
 
-    lines.append("# Moltbook Research Pack")
+    lines.append("# Moltbook Digest")
+    lines.append("")
+    lines.append("## Run Summary")
     lines.append("")
     lines.append(f"- Generated at: `{pack['generated_at']}`")
+    lines.append(f"- Analysis mode: `{mode}`")
+    lines.append(f"- Provider routing: `{runtime.get('provider')}`")
     lines.append(f"- Queries: {', '.join(f'`{query}`' for query in stats['queries'])}")
     lines.append(f"- Search type: `{stats['search_type']}`")
     lines.append(f"- Raw search hits: `{stats['raw_search_hits']}`")
     lines.append(f"- Unique posts from hits: `{stats['unique_posts_from_hits']}`")
     lines.append(f"- Expanded posts: `{stats['selected_posts']}`")
     lines.append("")
-    lines.append("## Scope Notes")
+    lines.append("## Collection Diagnostics")
+    lines.append("")
+    lines.append(f"- Search request failures: `{diagnostics.get('search_request_failures', 0)}`")
+    lines.append(f"- Post detail fetch failures: `{diagnostics.get('post_fetch_failures', 0)}`")
+    lines.append(f"- Comment fetch failures: `{diagnostics.get('comment_fetch_failures', 0)}`")
+    if warnings:
+        lines.append("Non-fatal warnings:")
+        for warning in warnings[:8]:
+            lines.append(f"- Warning: {warning}")
+        remaining = len(warnings) - 8
+        if remaining > 0:
+            lines.append(f"- ... and `{remaining}` additional warnings")
+    else:
+        lines.append("- Non-fatal warnings: none")
+    lines.append("")
+    lines.append("## Scope & Coverage")
     lines.append("")
     if stats["submolt_filter"]:
         lines.append(f"- Submolt filter: {', '.join(f'`{name}`' for name in stats['submolt_filter'])}")
@@ -732,6 +879,10 @@ def render_markdown(pack: dict[str, Any]) -> str:
         lines.append("- Submolt filter: none")
     lines.append(f"- Pages per query: `{stats['pages_per_query']}`")
     lines.append(f"- Comment sort and limit: `{stats['comment_sort']}` / `{stats['comment_limit']}`")
+    if stats["top_submolts"]:
+        lines.append("- Top submolts: " + ", ".join(f"`{name}` ({count})" for name, count in stats["top_submolts"][:5]))
+    if stats["top_authors"]:
+        lines.append("- Top authors: " + ", ".join(f"`{name}` ({count})" for name, count in stats["top_authors"][:5]))
     if stats["time_range"]:
         lines.append(
             f"- Time range across expanded posts: `{stats['time_range']['earliest']}` to `{stats['time_range']['latest']}`"
@@ -744,7 +895,7 @@ def render_markdown(pack: dict[str, Any]) -> str:
     lines.append("- Where do authors disagree because of different assumptions rather than different facts?")
     lines.append("- What important perspectives are still missing from this sample?")
     lines.append("")
-    lines.append("## Expanded Posts")
+    lines.append("## Evidence Posts")
     lines.append("")
 
     for index, item in enumerate(pack["posts"], start=1):
@@ -773,9 +924,13 @@ def render_markdown(pack: dict[str, Any]) -> str:
         lines.append(post["content"] or "")
         lines.append("```")
         lines.append("")
-        lines.append("Representative comments:")
-        if comments["samples"]:
-            for sample in comments["samples"]:
+        lines.append(
+            "Representative comments "
+            f"(sampled from `{comments.get('count', 0)}` comments, capped at `{args.analysis_comment_evidence_limit}`):"
+        )
+        sampled_comments = select_analysis_comments(comments["items"], args.analysis_comment_evidence_limit)
+        if sampled_comments:
+            for sample in sampled_comments:
                 lines.append(
                     f"- depth={sample['depth']} score={sample['score']} author=`{sample['author_name'] or 'unknown'}`"
                 )
@@ -787,22 +942,58 @@ def render_markdown(pack: dict[str, Any]) -> str:
             lines.append("- No comments sampled.")
         lines.append("")
 
-    lines.append("## Files")
+    if mode == "agent":
+        prompt_preview = build_runtime_analysis_prompt(
+            args,
+            runtime,
+            (
+                f"Use evidence from `{digest_name}` and `{evidence_name}`. "
+                f"If present, `{args.analysis_input_name}` can be used as the structured corpus snapshot."
+            ),
+        )
+        lines.append("## Agent Task Card")
+        lines.append("")
+        lines.append("Read this digest and then write the final report.")
+        lines.append("")
+        lines.append(f"- Target output file: `{args.analysis_output_name}`")
+        lines.append(f"- Output language: `{args.analysis_language}`")
+        lines.append(
+            "- Analysis instructions are shared with LiteLLM mode and come from `analysis.prompt_template`."
+        )
+        lines.append("Configured prompt preview:")
+        lines.append("")
+        lines.append("```text")
+        lines.append(prompt_preview)
+        lines.append("```")
+        lines.append("")
+
+    lines.append("## Output Files")
     lines.append("")
-    lines.append("- Full normalized corpus: `evidence.json`")
-    lines.append("- Analysis-ready markdown corpus: `brief.md`")
+    lines.append(f"- Unified markdown digest: `{digest_name}`")
+    lines.append(f"- Full normalized corpus: `{evidence_name}`")
+    if mode == "litellm":
+        lines.append(f"- LLM-generated report: `{args.analysis_output_name}`")
+    if mode == "agent":
+        lines.append(f"- Agent-generated report target: `{args.analysis_output_name}`")
     lines.append("")
     return "\n".join(lines)
 
 
-def resolve_analysis_question(args: argparse.Namespace) -> str:
+def resolve_analysis_question(args: argparse.Namespace, runtime: dict[str, Any] | None = None) -> str:
     if args.analysis_question:
         return clean_text(args.analysis_question)
-    return clean_text(
-        "Analyze Moltbook discussions around: "
-        + ", ".join(args.queries)
-        + ". Extract core themes, disagreements, risks, and practical actions."
-    )
+    template = DEFAULT_ANALYSIS_QUESTION_TEMPLATE
+    if runtime and isinstance(runtime.get("analysis_question_template"), str):
+        template = runtime["analysis_question_template"]
+    queries = ", ".join(args.queries)
+    try:
+        return clean_text(template.format(queries=queries))
+    except KeyError as exc:
+        missing = str(exc).strip("'")
+        raise SystemExit(
+            "Invalid analysis.question_template in config: missing placeholder "
+            f"{{{missing}}}. Allowed placeholder is {{queries}}."
+        ) from exc
 
 
 def apply_char_cap(text: str, limit: int, label: str) -> tuple[str, bool]:
@@ -826,10 +1017,15 @@ def select_analysis_comments(comment_tree: list[dict[str, Any]], limit: int) -> 
     return select_comment_samples(flat, limit)
 
 
-def render_analysis_input(pack: dict[str, Any], args: argparse.Namespace, for_litellm: bool) -> str:
+def render_analysis_input(
+    pack: dict[str, Any],
+    args: argparse.Namespace,
+    for_litellm: bool,
+    runtime: dict[str, Any] | None = None,
+) -> str:
     lines: list[str] = []
     stats = pack["stats"]
-    question = resolve_analysis_question(args)
+    question = resolve_analysis_question(args, runtime)
 
     lines.append("# Moltbook Analysis Input")
     lines.append("")
@@ -918,12 +1114,18 @@ def extract_litellm_text(response: Any) -> str:
     return ""
 
 
-def build_analysis_prompt(question: str, language: str, analysis_input_text: str, template: str) -> str:
+def build_analysis_prompt(
+    question: str,
+    language: str,
+    analysis_input_text: str,
+    template: str,
+    report_structure: str,
+) -> str:
     try:
         return template.format(
             analysis_question=question,
             analysis_language=language,
-            report_structure=DEFAULT_REPORT_STRUCTURE,
+            report_structure=report_structure,
             analysis_input=analysis_input_text,
         )
     except KeyError as exc:
@@ -935,19 +1137,29 @@ def build_analysis_prompt(question: str, language: str, analysis_input_text: str
         ) from exc
 
 
-def run_litellm_analysis(args: argparse.Namespace, analysis_input_text: str, runtime: dict[str, Any]) -> str:
-    try:
-        from litellm import completion  # type: ignore
-    except ImportError as exc:
-        raise SystemExit("LiteLLM is required for LiteLLM analysis. Install with: pip install litellm") from exc
-
-    question = resolve_analysis_question(args)
-    prompt = build_analysis_prompt(
+def build_runtime_analysis_prompt(
+    args: argparse.Namespace,
+    runtime: dict[str, Any],
+    analysis_input_text: str,
+) -> str:
+    question = resolve_analysis_question(args, runtime)
+    return build_analysis_prompt(
         question,
         args.analysis_language,
         analysis_input_text,
         runtime.get("analysis_prompt_template") or DEFAULT_ANALYSIS_PROMPT_TEMPLATE,
+        runtime.get("analysis_report_structure") or DEFAULT_REPORT_STRUCTURE,
     )
+
+
+def run_litellm_analysis(args: argparse.Namespace, prompt: str, runtime: dict[str, Any]) -> str:
+    try:
+        from litellm import completion  # type: ignore
+    except ImportError as exc:
+        raise SystemExit(
+            "LiteLLM is required for LiteLLM analysis. Install dependencies with uv "
+            "(for example: uv sync --project moltbook-digest)."
+        ) from exc
 
     try:
         response = completion(
@@ -983,8 +1195,14 @@ def run_litellm_analysis(args: argparse.Namespace, analysis_input_text: str, run
     return header + content + "\n"
 
 
-def render_agent_handoff(args: argparse.Namespace) -> str:
-    question = resolve_analysis_question(args)
+def render_agent_handoff(
+    args: argparse.Namespace,
+    digest_name: str,
+    evidence_name: str,
+    runtime: dict[str, Any],
+    prompt_text: str,
+) -> str:
+    question = resolve_analysis_question(args, runtime)
     lines = [
         "# Agent Handoff for Deep Interpretation",
         "",
@@ -992,35 +1210,22 @@ def render_agent_handoff(args: argparse.Namespace) -> str:
         "",
         question,
         "",
+        "## Routing",
+        "",
+        "- Analysis path: `agent`",
+        "- Template policy: shared with `litellm` mode (`analysis.prompt_template` + `analysis.report_structure`)",
+        f"- Output target: `{args.analysis_output_name}` in `{args.analysis_language}`",
+        "",
         "## Files to read",
         "",
+        f"- `{digest_name}`",
+        f"- `{evidence_name}`",
         f"- `{args.analysis_input_name}`",
-        "- `brief.md`",
-        "- `evidence.json`",
         "",
-        "## Required output",
-        "",
-        f"- Write `{args.analysis_output_name}` in `{args.analysis_language}`.",
-        "- Use explicit evidence references (post id, author, or direct excerpt).",
-        "- Distinguish evidence from inference.",
-        "- Identify tensions, contradictions, and open questions.",
-        "- End with concrete, prioritized next actions.",
-        "",
-        "## Suggested report structure",
-        "",
-        "1. Executive summary",
-        "2. Theme map",
-        "3. Disagreements and assumption conflicts",
-        "4. Confidence and blind spots",
-        "5. Actionable recommendations",
-        "",
-        "## Copy-paste prompt",
+        "## Unified Prompt (Same as LiteLLM Path)",
         "",
         "```text",
-        f"Please read {args.analysis_input_name}, brief.md, and evidence.json. "
-        f"Then generate {args.analysis_output_name} in {args.analysis_language}. "
-        "Do deep analysis (not simple summary), cite evidence, separate facts from inference, "
-        "and end with prioritized actions.",
+        prompt_text,
         "```",
         "",
     ]
@@ -1033,12 +1238,20 @@ def default_output_dir(queries: list[str]) -> Path:
     return Path("output") / "moltbook-digest" / f"{stamp}-{slug}"
 
 
-def write_outputs(pack: dict[str, Any], output_dir: Path) -> tuple[Path, Path]:
+def write_outputs(
+    pack: dict[str, Any],
+    args: argparse.Namespace,
+    runtime: dict[str, Any],
+    output_dir: Path,
+) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    json_path = output_dir / "evidence.json"
-    brief_path = output_dir / "brief.md"
+    json_path = output_dir / args.evidence_name
+    brief_path = output_dir / args.digest_name
     json_path.write_text(json.dumps(pack, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    brief_path.write_text(render_markdown(pack) + "\n", encoding="utf-8")
+    brief_path.write_text(
+        render_markdown(pack, args, runtime, args.digest_name, args.evidence_name) + "\n",
+        encoding="utf-8",
+    )
     return json_path, brief_path
 
 
@@ -1063,6 +1276,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--litellm-temperature must be between 0 and 2")
     if args.litellm_max_tokens < 64:
         raise SystemExit("--litellm-max-tokens must be >= 64")
+    if not str(args.digest_name).strip():
+        raise SystemExit("--digest-name must not be empty")
+    if not str(args.evidence_name).strip():
+        raise SystemExit("--evidence-name must not be empty")
+    if args.digest_name == args.evidence_name:
+        raise SystemExit("--digest-name and --evidence-name must be different filenames")
 
 
 def validate_runtime(args: argparse.Namespace, runtime: dict[str, Any]) -> None:
@@ -1087,46 +1306,68 @@ def main() -> int:
     validate_args(args)
     llm_config = load_yaml_file(Path(args.llm_config))
     runtime = resolve_provider_runtime(args, llm_config)
+    if not args.analysis_language:
+        args.analysis_language = runtime.get("analysis_default_language") or DEFAULT_ANALYSIS_LANGUAGE
     validate_runtime(args, runtime)
+    diagnostics = init_diagnostics()
 
-    search_hits = collect_search_hits(args)
+    search_hits = collect_search_hits(args, diagnostics)
     if not search_hits:
         raise SystemExit("No search hits returned. Try broader or more descriptive queries.")
 
     candidates = build_post_candidates(search_hits)
-    expanded_posts = expand_posts(args, candidates)
+    expanded_posts = expand_posts(args, candidates, diagnostics)
     if not expanded_posts:
         raise SystemExit("No posts matched the current filters after expansion. Try removing the submolt filter or broadening the query.")
 
     pack = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "api_base_url": args.base_url,
+        "runtime": {
+            "analysis_mode": runtime.get("analysis_mode"),
+            "provider": runtime.get("provider"),
+        },
         "stats": build_stats(args, search_hits, expanded_posts),
+        "diagnostics": diagnostics,
         "search_hits": search_hits,
         "posts": expanded_posts,
     }
 
     output_dir = Path(args.output_dir) if args.output_dir else default_output_dir(args.queries)
-    json_path, brief_path = write_outputs(pack, output_dir)
+    json_path, brief_path = write_outputs(pack, args, runtime, output_dir)
     print(f"Wrote {brief_path}")
     print(f"Wrote {json_path}")
+    if diagnostics.get("warnings"):
+        print(
+            "Completed with non-fatal warnings "
+            f"(`{len(diagnostics['warnings'])}` total). See `diagnostics.warnings` in {json_path.name}."
+        )
 
     if runtime["analysis_mode"] != "none":
-        analysis_input_path = output_dir / args.analysis_input_name
-        analysis_input_text = render_analysis_input(pack, args, for_litellm=False)
-        analysis_input_path.write_text(analysis_input_text + "\n", encoding="utf-8")
-        print(f"Wrote {analysis_input_path}")
+        legacy_analysis_input_text: str | None = None
+        if args.emit_legacy_analysis_files:
+            legacy_analysis_input_text = render_analysis_input(pack, args, for_litellm=False, runtime=runtime)
+            analysis_input_path = output_dir / args.analysis_input_name
+            analysis_input_path.write_text(legacy_analysis_input_text + "\n", encoding="utf-8")
+            print(f"Wrote {analysis_input_path}")
 
         if runtime["analysis_mode"] == "litellm":
-            llm_input = render_analysis_input(pack, args, for_litellm=True)
-            report_text = run_litellm_analysis(args, llm_input, runtime)
+            llm_input = render_analysis_input(pack, args, for_litellm=True, runtime=runtime)
+            llm_prompt = build_runtime_analysis_prompt(args, runtime, llm_input)
+            report_text = run_litellm_analysis(args, llm_prompt, runtime)
             analysis_report_path = output_dir / args.analysis_output_name
             analysis_report_path.write_text(report_text, encoding="utf-8")
             print(f"Wrote {analysis_report_path}")
 
-        if runtime["analysis_mode"] == "agent":
+        if runtime["analysis_mode"] == "agent" and args.emit_legacy_analysis_files:
+            if legacy_analysis_input_text is None:
+                legacy_analysis_input_text = render_analysis_input(pack, args, for_litellm=False, runtime=runtime)
+            handoff_prompt = build_runtime_analysis_prompt(args, runtime, legacy_analysis_input_text)
             handoff_path = output_dir / args.agent_handoff_name
-            handoff_path.write_text(render_agent_handoff(args) + "\n", encoding="utf-8")
+            handoff_path.write_text(
+                render_agent_handoff(args, args.digest_name, args.evidence_name, runtime, handoff_prompt) + "\n",
+                encoding="utf-8",
+            )
             print(f"Wrote {handoff_path}")
 
     return 0

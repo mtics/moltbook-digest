@@ -4,14 +4,60 @@ security:
   note: "Fill real API keys locally. Never commit real keys to git."
 
 analysis:
-  # Available placeholders:
-  # {analysis_question}, {analysis_language}, {report_structure}, {analysis_input}
+  default_language: "zh-CN"
+
+  # Used to generate {analysis_question} when CLI does not provide --analysis-question.
+  # Available placeholder: {queries}
+  question_template: |
+    Systematically browse the accessible posts relevant to {queries}. Ignore ads, spam, duplicates, and low-information content. Extract and consolidate the most meaningful material by identifying useful facts, insights, experiences, questions, methods, trends, and disagreements.
+    Then produce a clear, deduplicated, and structured analysis focused on {queries}. Separate evidence from interpretation, preserve only a small number of representative original expressions when necessary, and highlight key takeaways, recurring themes, actionable insights, open questions, and unresolved tensions.
+
+  report_structure: |
+    1. Corpus overview (per-post key points, common patterns, distinctive differences)
+    2. First-principles framing (goal, constraints, assumptions, success criteria)
+    3. Deep synthesis and interpretation (mechanisms, tradeoffs, contradictions, causal logic)
+    4. Confidence, uncertainty, and blind spots
+    5. Prioritized recommendations and follow-up questions
+
   prompt_template: |
     Research question: {analysis_question}
     User preferred language: {analysis_language}
     Hard requirement: You MUST write the final report in {analysis_language}.
 
-    Write a deep analytical report.
+    You MUST follow this workflow:
+
+    1) Summarize the corpus first:
+      - For each important post, extract its central claim or contribution.
+      - Identify the most important common patterns across posts.
+      - Identify the most meaningful differences, disagreements, or edge cases.
+      - Organize per-post summaries as an evidence review, not as a shallow list.
+      - For each post, explain:
+        - problem or discussion context
+        - main idea, method, or viewpoint
+        - practical value or contribution
+        - limitations, missing context, or possible bias
+      - Explain how each post relates to the user’s question and how it connects to other posts.
+      - Use clickable markdown links in each post heading when the original URL is available.
+      - Do not use placeholder headings such as Post A, Post B, or Work A without links.
+      - Write naturally, with clear flow, simple wording, and varied sentence length.
+      - Avoid generic AI-style phrasing, redundant wording, and em dash punctuation.
+
+    2) Apply first-principles reasoning:
+      - Restate the underlying user problem in terms of goals, constraints, tradeoffs, and decision criteria.
+      - Do NOT assume the user is fully clear about the goal or the best path.
+      - If the intent is ambiguous, explicitly state the main assumptions and plausible alternative interpretations.
+
+    3) Perform deep interpretation:
+      - Clearly separate evidence, inference, and uncertainty.
+      - Explain mechanisms and causal logic, not just surface patterns.
+      - Highlight tensions, contradictions, blind spots, and confidence limits.
+      - Do not overclaim beyond what the corpus supports.
+
+    4) End with action-oriented output:
+      - Provide prioritized recommendations.
+      - Provide concrete next steps where possible.
+      - End with the most useful follow-up questions for the user.
+
     Recommended structure:
     {report_structure}
 
