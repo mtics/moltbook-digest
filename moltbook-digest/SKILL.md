@@ -59,7 +59,7 @@ Use `scripts/moltbook_digest.py` to collect a normalized evidence pack.
 Typical command:
 
 ```bash
-python3 scripts/moltbook_digest.py \
+uv run --project . python scripts/moltbook_digest.py \
   --query "how agents handle memory" \
   --query "persistent memory architectures for agents" \
   --max-posts 6 \
@@ -68,10 +68,10 @@ python3 scripts/moltbook_digest.py \
 
 The script writes:
 
-- `output/moltbook-digest/<timestamp>-<slug>/brief.md`
+- `output/moltbook-digest/<timestamp>-<slug>/digest.md`
 - `output/moltbook-digest/<timestamp>-<slug>/evidence.json`
 
-`brief.md` should remain analysis-safe: keep full expanded post bodies and full sampled comments there by default. Use it as the markdown corpus for downstream reasoning, not as a teaser summary.
+`digest.md` should remain analysis-safe: keep full expanded post bodies and sampled comments by default. Use it as the markdown corpus for downstream reasoning, not as a teaser summary.
 
 Use repeated `--query` flags when the user's wording is too narrow for reliable coverage.
 
@@ -115,13 +115,7 @@ Use this when the user wants script-level automatic interpretation.
 Install:
 
 ```bash
-pip install litellm
-```
-
-Or install from the project file:
-
-```bash
-pip install -r requirements.txt
+uv sync --project .
 ```
 
 Provider config template:
@@ -131,7 +125,13 @@ cp config.example.yaml config.yaml
 ```
 
 Then fill real keys in `config.yaml` (do not commit it). The repository tracks only `config.example.yaml`.
-Prompt template for LiteLLM analysis also lives in `config.yaml` under `analysis.prompt_template`, and should require output in `{analysis_language}`.
+Prompt template for LiteLLM analysis also lives in `config.yaml` under `analysis.prompt_template`.
+It should require output in `{analysis_language}`, force a "summary first" pass (commonality + uniqueness), then apply first-principles reasoning and explicit assumptions.
+Placeholder values are also managed in config:
+- `analysis.default_language` for `{analysis_language}` default
+- `analysis.question_template` for `{analysis_question}` generation
+- `analysis.report_structure` for `{report_structure}`
+`{analysis_input}` is generated automatically from collected evidence.
 If `active_provider` is set to `agent`, no external key is required and interpretation runs in agent mode.
 The config file is intentionally minimal. Most provider defaults (such as base URL and key env names) are built into `scripts/moltbook_digest.py`.
 
@@ -145,7 +145,7 @@ Auto-selection behavior:
 Example:
 
 ```bash
-python3 scripts/moltbook_digest.py \
+uv run --project . python scripts/moltbook_digest.py \
   --query "how agents handle memory" \
   --query "persistent memory architectures for agents" \
   --analysis-mode litellm \
@@ -155,8 +155,11 @@ python3 scripts/moltbook_digest.py \
 
 Outputs added to the run folder:
 
-- `analysis_input.md` (structured context passed to the model)
 - `analysis_report.md` (LLM-generated deep analysis)
+
+Optional legacy output (for backward compatibility only):
+
+- `analysis_input.md` (requires `--emit-legacy-analysis-files`)
 
 Important:
 
@@ -170,7 +173,7 @@ Use this when the user wants their own agent to perform interpretation, without 
 Example:
 
 ```bash
-python3 scripts/moltbook_digest.py \
+uv run --project . python scripts/moltbook_digest.py \
   --query "agent memory governance" \
   --analysis-mode agent \
   --analysis-question "What are the core governance disagreements and practical policy implications?"
@@ -178,23 +181,22 @@ python3 scripts/moltbook_digest.py \
 
 Outputs added to the run folder:
 
-- `analysis_input.md` (full analysis context)
-- `agent_handoff.md` (copy-paste prompt and report requirements for your agent)
+- Agent task requirements embedded directly in `digest.md`
 
-`agent_handoff.md` is intentionally explicit about evidence standards, uncertainty handling, and required report structure.
+Optional legacy outputs (for backward compatibility only):
+
+- `analysis_input.md`
+- `agent_handoff.md`
 
 ### 5. Deliver a complete report
 
 Unless the user asks for a different format, structure the report like this:
 
-1. Research brief
-2. Method and scope
-3. Executive summary
-4. Major themes
-5. Representative posts and what each contributes
-6. Tensions, disagreements, or open questions
-7. Confidence, limits, and blind spots
-8. Recommended next queries or actions
+1. Corpus summary: per-post key points + commonality/uniqueness
+2. First-principles framing: user goal, constraints, tradeoffs, assumptions
+3. Deep interpretation: mechanisms, tensions, disagreement map
+4. Confidence, limits, and blind spots
+5. Prioritized actions and follow-up questions
 
 Match the user's language in the final report unless they ask otherwise.
 
@@ -204,6 +206,7 @@ Match the user's language in the final report unless they ask otherwise.
 - If results are noisy, tighten the question, add a submolt filter, or reduce `--max-posts`.
 - If a topic is too fresh, say the corpus is early and separate signal from speculation.
 - If you only have search hits and no expanded posts yet, do not write a confident report.
+- If some post IDs return `404` during expansion, keep going with remaining posts and report these skips from `diagnostics.warnings`.
 
 ## References
 

@@ -31,6 +31,7 @@ Treat this as a useful implementation detail, not a permanent guarantee. If beha
 - Search results may contain inline HTML tags such as `<mark>`. Strip them before analysis.
 - The public skill document mentions `similarity`, but live search results also expose `relevance`. Support either field.
 - Read rate limits can vary by endpoint. Honor the response headers instead of hardcoding one global limit.
+- Some search hits can reference post IDs that later return `404` on `/posts/{id}`. Treat per-item expansion errors as skippable.
 
 ## Core Endpoints
 
@@ -159,7 +160,7 @@ The current script supports two interpretation paths after collection:
 ### 2. `--analysis-mode agent`
 
 - Does not call an external LLM API
-- Prepares `analysis_input.md` plus `agent_handoff.md`
+- Writes an agent task card directly into `digest.md`
 - Suitable when users prefer their own agent runtime to do the reasoning pass
 
 ### Practical guidance
@@ -168,5 +169,6 @@ The current script supports two interpretation paths after collection:
 - If you need higher flexibility or custom orchestration, choose agent mode.
 - If you want provider-based routing, run with `--analysis-mode auto`.
 - If you want pure collection only, run with `--analysis-mode none`.
+- Non-fatal collection issues (for example per-post `404`) should be logged in `diagnostics.warnings` instead of crashing the whole run.
 - You can set `active_provider` in `config.yaml`; code-level defaults fill most provider details so config stays minimal.
 - `analysis.prompt_template` in `config.yaml` controls LiteLLM prompting and should explicitly require output in `{analysis_language}`.

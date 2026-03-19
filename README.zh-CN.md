@@ -12,15 +12,17 @@
 
 - 语义检索 Moltbook 内容（`/search`）
 - 自动展开帖子正文与评论树（`/posts/{id}`、`/posts/{id}/comments`）
-- 生成分析安全语料：`brief.md` + `evidence.json`
+- 生成分析安全语料：`digest.md` + `evidence.json`
 - 支持双路径解读：`agent` / `litellm`
 - 支持最小化 LLM 配置，常见 provider 默认值内置在代码中
+- 具备容错采集能力（坏帖子 ID 会跳过并记录告警）
 
 ## 目录结构
 
 - `moltbook-digest/scripts/moltbook_digest.py`：主脚本
 - `moltbook-digest/config.example.yaml`：LLM 配置模板
-- `moltbook-digest/requirements.txt`：依赖
+- `moltbook-digest/pyproject.toml`：uv 项目依赖
+- `moltbook-digest/uv.lock`：uv 锁文件（可复现环境）
 - `moltbook-digest/SKILL.md`：Skill 使用说明
 - `moltbook-digest/references/api.md`：API 参考与实践建议
 
@@ -29,7 +31,8 @@
 在仓库根目录执行：
 
 ```bash
-pip install -r moltbook-digest/requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync --project moltbook-digest
 ```
 
 ## 配置
@@ -60,7 +63,14 @@ cp moltbook-digest/config.example.yaml moltbook-digest/config.yaml
 - 模板只保留常改字段，`api_base` / `api_key_env` 等默认值由代码内置
 - `analysis.prompt_template` 已放入配置文件，支持占位符：
   `{analysis_question}`、`{analysis_language}`、`{report_structure}`、`{analysis_input}`
+- `agent` 与 `litellm` 路径共享同一套 `analysis.prompt_template` 管线，
+  两者只在执行对象上不同（`agent` 自身 vs 外部 LLM API）。
+- 占位符对应内容也已统一放在配置中管理：
+  `analysis.default_language`、`analysis.question_template`、`analysis.report_structure`
+- `{analysis_input}` 由脚本根据采集结果自动生成（来源：`digest.md` + `evidence.json`）
 - 默认模板明确要求按用户偏好语言（`{analysis_language}`）输出
+- 默认模板还要求：
+  先总结帖子共性/个性，再做第一性原理分析；当用户意图不清晰时，显式写出假设与替代路径
 
 ### Agent 配置要求（MUST）
 
@@ -69,8 +79,9 @@ cp moltbook-digest/config.example.yaml moltbook-digest/config.yaml
 1. 在给出任何配置建议前，先阅读 `moltbook-digest/config.example.yaml`。
 2. 先询问用户希望如何设置 `active_provider`（`agent` 还是外部 provider）。
 3. 询问用户使用哪个模型/provider，以及是否需要自定义 `analysis.prompt_template`。
-4. 询问凭据注入方式（使用现有环境变量，还是写入本地 `config.yaml`）。
-5. 在生成分析结果前，确认用户偏好的 `analysis_language`。
+4. 询问是否需要自定义 `analysis.question_template` 与 `analysis.report_structure`。
+5. 询问凭据注入方式（使用现有环境变量，还是写入本地 `config.yaml`）。
+6. 在生成分析结果前，确认用户偏好的 `analysis_language`。
 
 不要在未询问用户的情况下默认 provider、模型、密钥处理方式或输出语言。
 
@@ -79,7 +90,7 @@ cp moltbook-digest/config.example.yaml moltbook-digest/config.yaml
 ### 1) 仅采集证据（不解读）
 
 ```bash
-python3 moltbook-digest/scripts/moltbook_digest.py \
+uv run --project moltbook-digest python moltbook-digest/scripts/moltbook_digest.py \
   --query "agent memory architecture" \
   --query "agent memory failures and tradeoffs" \
   --analysis-mode none \
@@ -93,20 +104,20 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 确保 `config.yaml` 中 `active_provider: agent`，然后运行：
 
 ```bash
-python3 moltbook-digest/scripts/moltbook_digest.py \
+uv run --project moltbook-digest python moltbook-digest/scripts/moltbook_digest.py \
   --query "agent memory governance" \
   --analysis-mode auto \
   --llm-config moltbook-digest/config.yaml
 ```
 
-脚本会自动进入 agent 解读路径，输出 `analysis_input.md` 和 `agent_handoff.md`。
+脚本会自动进入 agent 解读路径，并在 `digest.md` 中写入 **Agent Task Card**。
 
 ### 3) LiteLLM 自动解读
 
 把 `active_provider` 改为外部 provider（例如 `openai`）并填 key，运行：
 
 ```bash
-python3 moltbook-digest/scripts/moltbook_digest.py \
+uv run --project moltbook-digest python moltbook-digest/scripts/moltbook_digest.py \
   --query "long-running agent memory patterns" \
   --analysis-mode auto \
   --llm-config moltbook-digest/config.yaml
@@ -117,7 +128,7 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 你也可以显式覆盖：
 
 ```bash
-python3 moltbook-digest/scripts/moltbook_digest.py \
+uv run --project moltbook-digest python moltbook-digest/scripts/moltbook_digest.py \
   --query "agent memory" \
   --analysis-mode litellm \
   --active-provider claude \
@@ -133,11 +144,16 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 
 核心文件：
 
-- `brief.md`：完整帖子正文 + 代表性评论（分析语料）
+- `digest.md`：统一 Markdown 语料（运行摘要、诊断信息、完整正文、评论样本、agent 任务卡）
 - `evidence.json`：结构化原始证据
-- `analysis_input.md`：统一分析输入上下文（分析模式开启时）
-- `agent_handoff.md`：给 agent 的解读任务模板（agent 模式）
 - `analysis_report.md`：LLM 生成的最终报告（litellm 模式）
+
+可选兼容文件（仅在开启 `--emit-legacy-analysis-files` 时生成）：
+
+- `analysis_input.md`
+- `agent_handoff.md`（仅 agent 模式）
+
+兼容说明：如果你的既有流程仍依赖 `brief.md`，可使用 `--digest-name brief.md`。
 
 ## 常用参数
 
@@ -147,24 +163,35 @@ python3 moltbook-digest/scripts/moltbook_digest.py \
 - `--submolt`：按 submolt 过滤
 - `--analysis-mode`：`none | agent | litellm | auto`
 - `--analysis-question`：明确报告要回答的问题
-- `--analysis-language`：报告语言，默认 `zh-CN`
+- `--analysis-language`：报告语言；不传时使用配置中的 `analysis.default_language`
 - `--llm-config`：LLM 配置文件路径
 - `--active-provider`：覆盖配置中的 provider
+- `--digest-name`：重命名统一 markdown 输出（默认 `digest.md`）
+- `--evidence-name`：重命名 JSON 证据输出（默认 `evidence.json`）
+- `--emit-legacy-analysis-files`：额外生成 `analysis_input.md` / `agent_handoff.md`
 
 查看完整参数：
 
 ```bash
-python3 moltbook-digest/scripts/moltbook_digest.py --help
+uv run --project moltbook-digest python moltbook-digest/scripts/moltbook_digest.py --help
 ```
 
 ## 模式规则
 
 - `analysis-mode=none` -> 仅采集，不解读
-- `analysis-mode=agent` -> 输出 `analysis_input.md` + `agent_handoff.md`
+- `analysis-mode=agent` -> 在 `digest.md` 中生成 Agent Task Card（不调用外部 LLM）
 - `analysis-mode=litellm` -> 通过 LiteLLM 产出 `analysis_report.md`
+- `agent` 与 `litellm` 使用同一份分析模板与报告结构配置
 - `analysis-mode=auto` + `active_provider=agent` -> 自动走 agent 解读
 - `analysis-mode=auto` + 外部 provider -> 自动走 LiteLLM 解读
 - `analysis-mode=auto` + 未显式配置 provider -> 回退到默认解析 provider（`agent`）
+
+## 容错策略
+
+- 搜索分页请求失败默认不致命：会继续处理其余 query/page。
+- 单条帖子扩展失败（如 `/posts/{id}` 返回 `404`）会跳过，不再中断整次任务。
+- 评论拉取失败会回退为空评论，保证该帖子仍可被纳入结果。
+- 所有非致命问题都会写入 `evidence.json` 的 `diagnostics.warnings`。
 
 ## 安全建议
 
