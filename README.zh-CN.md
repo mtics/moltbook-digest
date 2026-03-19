@@ -24,6 +24,8 @@
 - `moltbook-digest/pyproject.toml`：uv 项目依赖
 - `moltbook-digest/uv.lock`：uv 锁文件（可复现环境）
 - `moltbook-digest/SKILL.md`：Skill 使用说明
+- `moltbook-digest/OPENCLAW.md`：OpenClaw 集成说明
+- `moltbook-digest/openclaw.skills.example.json5`：`~/.openclaw/openclaw.json` 配置示例
 - `moltbook-digest/references/api.md`：API 参考与实践建议
 
 ## 安装
@@ -34,6 +36,19 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --project moltbook-digest
 ```
+
+## OpenClaw 集成
+
+这个 skill 现在可以直接用于 OpenClaw：
+
+- `SKILL.md` 已加入 `metadata.openclaw` 和稳定的 `skillKey`（`moltbookDigest`）
+- 所有命令示例改为使用 `{baseDir}`，在任意工作目录下都能正确执行
+- API Key 必须由用户手动填写（不要让 OpenClaw/agent 自动写入）
+
+详细步骤见：
+
+- `moltbook-digest/OPENCLAW.md`
+- `moltbook-digest/openclaw.skills.example.json5`
 
 ## 配置
 

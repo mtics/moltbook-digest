@@ -1,6 +1,9 @@
 ---
 name: moltbook-digest
 description: Research Moltbook posts and comment threads using Moltbook's public API. Use when the user wants keyword-based discovery, semantic search, deep summarization, trend analysis, or a structured report about Moltbook discussions.
+homepage: https://www.moltbook.com
+user-invocable: true
+metadata: {"openclaw":{"homepage":"https://www.moltbook.com","skillKey":"moltbookDigest","requires":{"bins":["uv"]}}}
 ---
 
 # Moltbook Digest
@@ -59,7 +62,7 @@ Use `scripts/moltbook_digest.py` to collect a normalized evidence pack.
 Typical command:
 
 ```bash
-uv run --project . python scripts/moltbook_digest.py \
+uv run --project "{baseDir}" python "{baseDir}/scripts/moltbook_digest.py" \
   --query "how agents handle memory" \
   --query "persistent memory architectures for agents" \
   --max-posts 6 \
@@ -115,13 +118,13 @@ Use this when the user wants script-level automatic interpretation.
 Install:
 
 ```bash
-uv sync --project .
+uv sync --project "{baseDir}"
 ```
 
 Provider config template:
 
 ```bash
-cp config.example.yaml config.yaml
+cp "{baseDir}/config.example.yaml" "{baseDir}/config.yaml"
 ```
 
 Then fill real keys in `config.yaml` (do not commit it). The repository tracks only `config.example.yaml`.
@@ -134,6 +137,8 @@ Placeholder values are also managed in config:
 `{analysis_input}` is generated automatically from collected evidence.
 If `active_provider` is set to `agent`, no external key is required and interpretation runs in agent mode.
 The config file is intentionally minimal. Most provider defaults (such as base URL and key env names) are built into `scripts/moltbook_digest.py`.
+For OpenClaw, provider secrets must be filled manually by the user in local config/env.
+Do not ask OpenClaw/agent to write or reveal API keys.
 
 Auto-selection behavior:
 
@@ -145,10 +150,11 @@ Auto-selection behavior:
 Example:
 
 ```bash
-uv run --project . python scripts/moltbook_digest.py \
+uv run --project "{baseDir}" python "{baseDir}/scripts/moltbook_digest.py" \
   --query "how agents handle memory" \
   --query "persistent memory architectures for agents" \
   --analysis-mode litellm \
+  --llm-config "{baseDir}/config.yaml" \
   --litellm-model "openai/gpt-4.1-mini" \
   --analysis-question "What durable design patterns and failure modes emerge from these discussions?"
 ```
@@ -173,9 +179,10 @@ Use this when the user wants their own agent to perform interpretation, without 
 Example:
 
 ```bash
-uv run --project . python scripts/moltbook_digest.py \
+uv run --project "{baseDir}" python "{baseDir}/scripts/moltbook_digest.py" \
   --query "agent memory governance" \
   --analysis-mode agent \
+  --llm-config "{baseDir}/config.yaml" \
   --analysis-question "What are the core governance disagreements and practical policy implications?"
 ```
 

@@ -24,6 +24,8 @@ It supports two interpretation paths:
 - `moltbook-digest/pyproject.toml`: uv project dependencies
 - `moltbook-digest/uv.lock`: uv lockfile for reproducible environments
 - `moltbook-digest/SKILL.md`: skill usage guide
+- `moltbook-digest/OPENCLAW.md`: OpenClaw integration guide
+- `moltbook-digest/openclaw.skills.example.json5`: sample `~/.openclaw/openclaw.json` skill entry
 - `moltbook-digest/references/api.md`: API notes and guidance
 
 ## Installation
@@ -34,6 +36,19 @@ Run from repository root:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --project moltbook-digest
 ```
+
+## OpenClaw Integration
+
+This skill is OpenClaw-ready:
+
+- `SKILL.md` includes `metadata.openclaw` and a stable `skillKey` (`moltbookDigest`)
+- command examples use `{baseDir}` to work from any runtime working directory
+- API keys must be filled manually by the user (never by OpenClaw/agent)
+
+See detailed steps in:
+
+- `moltbook-digest/OPENCLAW.md`
+- `moltbook-digest/openclaw.skills.example.json5`
 
 ## Configuration
 

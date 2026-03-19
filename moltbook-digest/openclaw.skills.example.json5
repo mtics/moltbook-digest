@@ -1,0 +1,21 @@
+{
+  skills: {
+    entries: {
+      moltbookDigest: {
+        enabled: true,
+        config: {
+          note: "optional custom fields for this skill"
+        },
+        // Optional env block can be added manually by the user.
+        // Do not ask agent/OpenClaw to write or print API keys.
+        // env: {
+        //   OPENAI_API_KEY: "<manually filled by user>"
+        // }
+      }
+    },
+    load: {
+      watch: true,
+      watchDebounceMs: 250
+    }
+  }
+}
